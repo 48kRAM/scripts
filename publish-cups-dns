@@ -1,0 +1,203 @@
+#!/usr/bin/perl
+
+
+# Script to push discovery information about CUPS printer
+#   queues into wide-area DNS for DNS-SD
+
+# Hostname/IP of your DNS server
+$DNSSRV='';
+
+# Set this to '' if cups is installed in /
+#$CUPS='/usr/local/cups';
+$CUPS='';
+
+# Hostname / IP of your CUPS server
+$CUPS_SERVER='printhost';
+
+# Space-separated list of domains to push DNS-SD info into
+$SD_DOMAINS="dom1.example.com dom2.example.com";
+
+####################################################################
+#
+#  Nothing below this line should need to be changed
+#    unless your CUPS install is weird. You have been warned!
+#
+
+use Switch;
+
+$hostname=`hostname -f`;
+chomp($hostname);
+($cupshost, $myDomain)=split('\.', $hostname, 2);
+$PPDS="$CUPS/etc/cups/ppd";
+
+if($ARGV[0] eq "-d") { $delonly=1; shift @ARGV; }
+if($ARGV[0] eq "-g") { $dbg=1 ; shift @ARGV };
+if($ARGV[0] eq "-v") { $dbg=1 ; shift @ARGV }
+if($ARGV[0] eq "-n") {
+    $dryrun=1;
+} else {
+    $dryrun=0;
+}
+
+# Tell the cups tools which server to query
+$ENV{'CUPS_SERVER'}=$CUPS_SERVER;
+
+
+# Start the nsupdate process
+if ($dryrun) {
+    open(NDC, ">/tmp/dns-update.log") || die ("Cannot create dry run logfile!\n");
+} else {
+    open(NDC, "|tee /tmp/commands | /usr/bin/nsupdate -v >/tmp/dns-update.log 2>&1") || die ("Fatal - cannot start 'nsupdate'!\n");
+}
+
+foreach $DOM (split(' ', $SD_DOMAINS)) {
+
+    #######  Determine the DNS master to send updates to  ########
+    if ($DNSSRV eq '') {
+	$res=`dig +short $DOM IN SOA`;
+	chomp($res);
+	if ($res eq '') {
+	    die ("Error: can't determine DNS master for zone $DOM\n");
+	} else {
+	    $DNSSRV=$res;
+	    $DNSSRV=~s/\. .*//;
+	    print "Sending updates to server $DNSSRV\n" if ($dbg);
+	}
+    }
+    print (NDC "server $DNSSRV\n") || die ("Error writing to nsupdate process!\n");
+
+    #######  Check to make sure the domain is set up for wide-area DNS-SD  ########
+    foreach $pointer ('b', 'lb', 'db') {
+	$res=`dig +short $pointer._dns-sd._udp.$DOM IN PTR`;
+	chomp($res);
+	print "$pointer pointer is $res\n" if ($dbg);
+	if ($res ne "$DOM.") {
+	    print "Warning: domain $DOM is missing DNS-SD $pointer pointer\n";
+	    print "   Attempting to add\n";
+	    print (NDC "update add $pointer._dns-sd._udp.$DOM. 600 IN PTR $DOM.\n");
+	    print (NDC "send\n");
+	}
+    }
+
+    ######  Delete all existing cups data from dns  ################
+    print ("Clearing old dns-sd cups data...\n") if ($dbg);
+    print (NDC "update delete _cups._sub._ipp._tcp.$DOM IN PTR\n");
+    print (NDC "update delete _ipp._tcp.$DOM. IN PTR\n");
+    print (NDC "send\n");
+    open (DIG, "dig \@$DNSSRV $DOM in axfr|");
+    while ($dig=<DIG>) {
+	if ($dig=~/_tcp.*TXT/){
+	    ($prt) = split(/ /, $dig);
+	    $prt=~s/\..*//;
+	    $printers{$prt}=1;
+	}
+    }
+    close(DIG);
+    foreach $prt (keys(%printers)) {
+	print ("Removing old printer: $prt._ipp._tcp.$DOM\n") if ($dbg);
+	print (NDC "update delete $prt._ipp._tcp.$DOM IN ANY\n");
+    }
+    print (NDC "send\n");
+
+
+    ##########  Publish the new cups DNS-SD info  ############
+    if (! -e "$CUPS/etc/cups/printers.conf") {
+	die ("Error: Cannot find cups or printers.conf!\n");
+    }
+    open(PRN, "< $CUPS/etc/cups/printers.conf");
+    while($lp=<PRN>) {
+	chomp($lp);
+	print ("Parsing line $lp\n") if ($dbg);
+	if ($lp=~/\<(Default)*Printer /) {
+	    # Found a new printer
+	    $inlp=1;  $prod="";
+	    $prt=$lp;
+	    $prt=~s/\<.*Printer (.*)\>/$1/;
+	    print ("Found printer $prt\n") if ($dbg);
+
+	    $ppd=$PPDS."/".$prt.".ppd";
+	    print ("  PPD file is $ppd\n") if ($dbg);
+	    if (! -e "$ppd") {
+		print (" Printer $prt not a real printer - skipping\n") if ($dbg);
+		next;
+	    }
+	}
+	if ($lp=~/^Info/) {
+	    #$ty=substr($lp, 5);
+	    print ("  Info: $ty\n") if ($dbg);
+	}
+	if ($lp=~/^Location/) {
+	    $note=substr($lp, 9);
+	    print ("  Location: $note\n") if ($dbg);
+	}
+	if ($lp=~/^Shared Yes/) {
+	    $shared=1
+	}
+	if ($lp=~/^Shared No/) {
+	    $shared=0
+	}
+	if ($lp=~/\<\/Printer\>/) {
+	    # End of printer block - write the config
+	    if (!$inlp) {
+		# Bad printer block - bail out!
+		die ("Error: Malformed printers.conf!\n");
+	    }
+
+	    # Find product type from the PPD file
+	    open (PPD, "<$ppd") || die ("Error: Cannot find PPD for $prt!\n");
+	    while(<PPD>) {
+		if (/^*Product:\s/) {
+		    chomp();
+		    $prod=$_;
+		    $prod=~s/\*Product:\s*"(.*)"/$1/;
+		    $prod=~s/\cM//;
+		    $ty=$prod;
+		    $ty=~s/[()]//g;
+		    print ("  Printer is a $prod\n") if ($dbg);
+		}
+	    }
+	    close (PPD);
+
+	    # Try to read duplex capability from lpoptions
+	    $duplex=0; $add="";
+	    open (INFO, "lpoptions -p $prt -l|");
+	    while(<INFO>) {
+		if (/Duplex Unit.*\*/) {
+		    chomp();
+		    $dup=$_;
+		    $dup=~s/.*\*(\w+)\s*.*/$1/;
+		    switch ($dup) {
+			case "False"	{ $duplex=0 };
+			case "True"		{ $duplex=1; $add="\"Duplex=T\"" };
+			case "Installed"	{ $duplex=1; $add="\"Duplex=T\"" };
+			case "NotInstalled"	{ $duplex=0 };
+		    }
+		}
+	    }
+	    close (INFO);
+
+	    if ($prod eq "") {
+		print ("Error - no model info for $prt!\n");
+		$inlp=0;
+		next;
+	    }
+
+	    if (!$delonly)  { 
+		if ($shared) {
+		    print "Adding $prt to $DOM...\n" if ($dbg);
+		    print (NDC "update add _ipp._tcp.$DOM. 60 IN PTR $prt._ipp._tcp.$DOM.\n");
+		    print (NDC "update add _cups._sub._ipp._tcp.$DOM. 60 IN PTR $prt._ipp._tcp.$DOM.\n");
+		    print (NDC "update add $prt._ipp._tcp.$DOM. 60 IN SRV 0 0 631 $cupshost.\n");
+		    print (NDC "update add $prt._ipp._tcp.$DOM. 60 IN TXT \"txtvers=1\" \"qtotal=1\" \"rp=printers/$prt\" \"ty=$ty\" \"note=$note\" \"product=$prod\" $add\n");
+		    print (NDC "send\n");
+		}
+	    }
+	    $inlp=0;
+	}
+    }
+
+} # End $SD_DOMAINS loop
+
+print (NDC "quit\n");
+close (NDC);
+close (PRN);
