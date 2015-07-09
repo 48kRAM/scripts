@@ -33,7 +33,7 @@ $yourdomain="example.com";
 
 # Display names for the auto-configured email account
 $displayname="Example, Inc. E-mail";
-$shortname="Example"
+$shortname="Example";
 
 
 ### IMAP server
