@@ -1,0 +1,80 @@
+#!/bin/bash
+
+# Use the TAPE envar by default
+tapedev="${TAPE:-/dev/nst0}"
+
+# Default base name of 'fitstape'
+basename='fitstape'
+
+# Tape block size for FITS files
+blocksize=28800
+
+function helpme {
+    echo "read-fits-tape"
+    echo "Extracts all FITS files from a FITS tape into current directory"
+    echo ""
+    echo "Usage: $0 [-f <tapedev>] [-b <basename>]"
+    echo ""
+    echo "    -f  Path to tape device (Def: /dev/nst0)"
+    echo "    -b  Base filename for extracted files (Def: fitstape)"
+    echo ""
+}
+while getopts "hf:b:" opt ; do
+    case "$opt" in
+    	f)	tapedev="$OPTARG"
+		;;
+	b)	basename="$OPTARG"
+		;;
+	h)	helpme
+		exit
+		;;
+	*)	echo "Unknown option: $opt" >&2
+		helpme
+		exit 1
+		;;
+    esac
+done
+
+if [ -z "$1" ]; then
+    read -n 1 -p "Will read FITS tape from $tape. Proceed (y/n)? " yorn
+    case "$yorn" in
+    	n|N)	echo -e "\nAborting!"
+		exit 1
+		;;
+	*)	echo -e "\nContinuing with default settings..."
+		;;
+    esac
+fi
+
+# Error out if we don't have perms on the tape device
+if ! [ -r "$tapedev" ]; then
+    echo "Error: cannot read from tape device $tapedev" >&2
+    exit 1
+fi
+
+# Set variable blocksize
+if ! mt -f "${tapedev}" setblk 0 ; then
+    echo -e "WARNING: Unable to set tape blocksize. Read errors may occur.\n"
+fi
+
+file=0
+seqnum=$(printf "%05d" $file)
+outfile="${basename}-${seqnum}.fits"
+if [ -f "${outfile}" ]; then
+    echo "Error: Cowardly refusing to overwrite exiting file $outfile" >&2
+    exit 1
+fi
+echo "Reading file $file from $tapedev..."
+while dd if="${tapedev}" of="${outfile}" bs=$blocksize >/dev/null; do
+    file=$(( $file +1 ))
+    seqnum=$(printf "%05d" $file)
+    outfile="${basename}-${seqnum}.fits"
+    if [ -f "${outfile}" ]; then
+	echo "Error: Cowardly refusing to overwrite exiting file $outfile" >&2
+	exit 1
+    fi
+    echo "Reading file $file from $tapedev..."
+done
+
+echo "Done reading files from $tapedev"
+echo "$file files read from tape"
