@@ -1,0 +1,107 @@
+#!/usr/bin/perl
+use Getopt::Long;
+use Data::Dumper;
+use IO::Socket;
+
+sub bin2dec {
+  return unpack("N", pack("B32", substr("0" x 32 . shift, -32)));
+}
+sub xlink_sum {
+    my @cmdbytes = @_;
+    my $sum = 0;
+    foreach my $byte (@cmdbytes) {
+    	next if ($byte eq '');
+	my $dec_byte=sprintf("%d", hex($byte));
+	$sum += $dec_byte;
+    }
+    my $bin_comp=substr(sprintf("%08b", ~$sum), -8);
+    my $chksum = bin2dec($bin_comp) + 1;
+    return (sprintf("%02x", $chksum));
+}
+
+##########################
+
+GetOptions(
+  "h|host=s"	=> \$iphost,
+  "p|port=s"	=> \$ipport,
+  "list"	=> \$listem,
+  "encode=s"	=> \$encode_symbol,
+  "help"	=> \$helpme
+);
+
+if ($helpme) {
+    printf("Output Samsung Ex-link commands\n");
+    printf("Options:\n");
+    printf("  -h | --host     Send command to IP host\n");
+    printf("  -p | --post     Send command to host port\n");
+    printf("  --list          List known Ex-link commands\n");
+    printf("  --encode s      Print output in ASCII hex encoding with s delimiter\n");
+    exit();
+}
+
+if ($iphost && $ipport) {
+    $sock = new IO::Socket::INET (
+    	PeerAddr => $iphost,
+	PeerPort => $ipport,
+	Proto => 'tcp',
+    );
+    die ("Cannot create socket: $!") unless $sock;
+}
+
+%XLINK = (
+    PWRON =>	"00000002",
+    PWROFF =>	"00000001",
+    VGA =>	"0a000400",
+    HDMI1 =>	"0a000500",
+    HDMI2 =>	"0a000501",
+    HDMI3 =>	"0a000502",
+    HDMI4 =>	"0a000503",
+    AV1 =>	"0A000100",
+    YUV1 =>	"0A000300",
+    SVID1 =>	"0a000200",
+    TV =>	"0a000000",
+);
+
+if ($listem) {
+    foreach $cmdname (keys(%XLINK)) {
+        printf("  %s\n", $cmdname);
+    }
+    exit();
+}
+
+$cmd = $ARGV[0];
+
+if ($cmd eq 'VOL') {
+    # VOL takes a mandatory paramter
+    if (!defined($ARGV[1])) {
+    	die ("VOL command requires a volume parameter");
+    }
+    # Construct a VOL command that embeds the numeric parameter in hex
+    $volparam = sprintf("%02x", $ARGV[1]);
+    $XLINK{'VOL'} = "010000".$volparam;
+}
+if ($cmd eq 'CHAN') {
+    # CHAN takes a mandatory parameter
+    if (!defined($ARGV[1])) {
+    	die ("CHAN command requires channel number");
+    }
+    $chanparam = sprintf("%02x", $ARGV[1]);
+    $XLINK{'CHAN'} = '040000'.$chanparam;
+}
+
+if (defined($XLINK{$cmd})) {
+    $fullcmd="0822".$XLINK{$cmd};
+    @bytes = grep(/\S/, split(/(..)/, $fullcmd, -1 ) );
+    $fullcmd.=xlink_sum(@bytes);
+    $bindata=pack('H*', $fullcmd);
+    if ($sock) {
+    	print $sock $bindata;
+    } elsif ($encode_symbol) {
+    	printf("%s%s\n", $encode_symbol, join($encode_symbol, unpack("(A2)*", $fullcmd)));
+    } else {
+    	print $bindata;
+    }
+} else {
+    printf("Error: command %s is not known\n", $cmd);
+    exit(1);
+}
