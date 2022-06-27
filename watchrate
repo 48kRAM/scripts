@@ -1,0 +1,126 @@
+#!/usr/bin/env perl
+
+#Copyright (c) 2022
+#
+#Permission is hereby granted, free of charge, to any person obtaining a copy
+#of this software and associated documentation files (the "Software"), to deal
+#in the Software without restriction, including without limitation the rights
+#to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+#copies of the Software, and to permit persons to whom the Software is
+#furnished to do so, subject to the following conditions:
+#
+#The above copyright notice and this permission notice shall be included in all
+#copies or substantial portions of the Software.
+#
+#THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+#IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+#FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+#AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+#LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+#OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+#SOFTWARE.
+
+use Getopt::Long qw(:config no_ignore_case);
+use Time::HiRes qw(gettimeofday);
+use Data::Dumper;
+use strict;
+
+my $process='';
+my $filename='';
+my $fieldsep=':';
+my $preset='';
+my $helpMe=undef;
+my @matchstr;
+my $verbose=0;
+my $prevcount=0;
+my $curcount=0;
+my $nsamp=0;
+my $delay=1;
+my $winsize=10;
+my $starttime=time();
+my $lasttime=0;
+my %patterns;
+
+GetOptions(
+    "c|command=s"	=> \$process,
+    "f|file=s"      => \$filename,
+    "F=s"		    => \$fieldsep,
+    "s=s"           => \@matchstr,
+    "n|delay=i"     => \$delay,
+    "v|verbose+"    => \$verbose,
+    "w=i"           => \$winsize,
+    "preset=s"      => \$preset,
+    "h|help"        => \$helpMe,
+);
+if (!$process or $#matchstr <0 or $helpMe) {
+    doHelp();
+}
+
+# Prepare the main patterns hash
+foreach my $s (@matchstr) {
+    printf("Init pattern %s\n", $s) if ($verbose>2);
+    $patterns{$s}{counts}=();
+    $patterns{$s}{times}=();
+}
+print Dumper %patterns if ($verbose>2);
+while (1) {
+    # Reset matched counts
+    foreach my $p (keys(%patterns)) { $patterns{$p}{matched}=0; }
+    open (my $ph, "-|", "$process") or die ("Can't open process to read");
+    my $now=gettimeofday;
+    while (my $line=<$ph>) {
+        printf("Line: %s", $line) if ($verbose>2);
+        foreach my $p (keys(%patterns)) {
+            next if ($patterns{$p}{matched});
+            printf("Checking match against %s\n", $p) if ($verbose>2);
+            if ( index($line, $p) >=0) {
+                printf("  - Matched!\n") if ($verbose>2);
+                chomp($line);
+                my @fields=split($fieldsep, $line, 2);
+                $curcount=$fields[1];
+                push(@{$patterns{$p}{counts}}, $curcount);
+                push(@{$patterns{$p}{times}}, $now);
+                $patterns{$p}{matched}=1;
+            }
+        }
+    }
+    close($ph);
+
+    foreach my $p (keys(%patterns)) {
+        my @counts=@{$patterns{$p}{counts}};
+        my @times=@{$patterns{$p}{times}};
+
+        if ($#counts > 0) {
+            printf("Computing averages\n") if ($verbose >1);
+            my $diff=$counts[$#counts] - $counts[$#counts-1];
+
+            my $sum=0;
+            for (my $x=1; $x<=$#counts; $x++ ) {
+                $sum+=($counts[$x] - $counts[$x-1]);
+            }
+            # Average is per second, so div sum by time difference
+            my $avg=$sum / ( $times[$#times] - $times[0]);
+            $avg=commaformat($avg);
+            printf("%s %10d (avg: %s /sec)\n", $p,
+                $diff, $avg);
+            if ($#counts >= $winsize-1 ) {
+                shift(@counts);
+                shift(@times);
+            }
+        }
+    }
+    sleep($delay);
+}
+
+sub doHelp() {
+    print("Usage: countps -c <command> -s <string> [-w <winsize] [-n <delay]\n");
+    exit(0);
+}
+sub commaformat() {
+    my ($val)=@_;
+    my $rev = reverse int($val);
+    my @c = unpack("(A3)*", $rev);
+    $rev = join ',', @c;
+    $val = reverse $rev;
+    return $val;
+}
